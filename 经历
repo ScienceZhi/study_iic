@@ -1,0 +1,216 @@
+作者：科技植 QQ:806329586
+其中错别字请谅解
+目的：
+本着学以致用的态度，在学完了朱老师linux驱动课程后，想更了解i2c的相关通信，毕竟以后的工作中肯定会经常用，说不定还会自己写个驱动什么的。
+我的九鼎x210开发板上的i2c0总线上挂载着gsensor(芯片:KXTE9)重力传感器。
+
+探索方式：
+在没看驱动代码的前提下，我尝试在百度上输入linux应用层i2c通信。然后再对比了几篇博客后，选择采用http://blog.csdn.net/luckywang1103/article/details/16810833和http://www.61ic.com/Technology/embed/201303/47398.html做参考，来写自己的应用层代码。
+
+过程：
+写完代码后(open的/dev/i2c-0)，编译运行，发现能收到信息，收到的信息是0x40。但是根据gsensor芯片的数据手册，访问寄存器地址0x0C返回的值应该是0x55或者0xAA(大小端的原因)，产生了这样的问题后，我也比较束手无策。去对比了其他博客发现，我的代码也没问题呀，能收到返回的值，但返回的值就是不对。这让我很困惑。在简单的跟我的朱有鹏老师交流了几句后，老师说，它当初也没去细看gsensor的驱动代码，怀疑可能是gsensor的驱动代码有问题。于是我也就这样踏上了去驱动里排错的征程。
+不过在写接下来的东西前，我得提前把结果交代在这里：我也是到最后把问题解决得差不多了和回顾了一点以前看的驱动视频，才意识到在征程期间自己犯的错，即要利用驱动实现i2c通信，有两种方式，第一种是用i2c适配器，也就是/dev/i2c-adapter，这样写的应用层代码，相当于要求程序员非常了解gsensor的芯片; 第二种，就是利用芯片厂商提供的驱动代码，内核源码树中叫s3c_sensor_kxtf9.c的驱动代码，这驱动代码，会提供/dev/sensor，来提供便捷操作与访问。这里面的代码我也去看过，去调试过，不得不说，这东西，确实只能是做芯片的厂商才最了解怎么写，(就比如里边的延时，x,y,z的加速度计算)，同时我也觉得他们的驱动代码有问题。
+为什么要做上面的交代呢，因为一开始我把这两种方式混为一谈。简单排查后，我认为之所以我写的代码返回的值不对，是因为我没编译出s3c_sensor_kxtf9.o，于是我make menuconfig里使能了obj-$(CONFIG_SENSOR_KXTF9)选项。于是重新挂载内核后，能看到/dev/sensor。我去open了它，然后......就不做这里的错误操作记录了(因为其中还涉及我去分析s3c_sensor_kxtf9.c的全部代码和和i2c0相关的代码，和添加打印调试信息），不然可以写一篇作文了，不过想想都是一把心酸泪，以记不得那是多少个日夜了。
+好了跳过中间好几天的分析，来到黎明前的最后两天(中间这几天的东西，我会以图片的形式，展示我做的记录和分析，虽然这期间还帮补考同学复习和准备期中考试两件事来占我大脑的CPU和时间内存)。
+来到黎明前的第二个晚上(最后面会讲到黎明到来)，经过大量的阅读相关驱动代码，我明白了：对i2c的操作分两种(前面已经说过了)，于是我将obj-$(CONFIG_SENSOR_KXTF9)屏蔽，选择使用i2c adapter的方式来实现通信; 同时我也知道了除了用ioctl函数的方式写应用代码，还可以用write和read，在我实在找不出是什么原因导致了接收到的数据不对的情况下，我决定放弃一直用的ioctl，使用read/write函数来实现应用层代码。在参考http://blog.csdn.net/colwer/article/details/8309403博客后，修改出了自己的应用层代码。编译运行后收到0x55，有点小激动。为了确认这个数据不是偶然的，我将gsensor芯片的CTRL_REG3寄存器的CTC位设置为1。发现，收到的值为0xAA。这次终于能确定这时正常的i2c通信了(依据来自gsensor手册：This register has a byte value of 0x55h except when the CTC bit in CTRL_REG3 is set, this value is set to 0xAAh)。
+完成了应用层的通信，我决定再次整理思路，去看驱动代码，到底是哪里的问题，让最开始使用ioctl函数的应用层代码，接收到的值不是0x55或0xAA。
+在网上找了好几篇介绍i2c的相关博客，最终找到一篇讲得算是非常详细的，详细到令人发指(http://www.51hei.com/bbs/dpj-30370-1.html)，所以非常感谢这篇博客给我提供的帮助(http://blog.csdn.net/lizuobin2/article/details/51694574这篇算是辅助理解吧(可不看))。同时再结合前面这么多个日夜，我比较流畅的结合博客里的分析，对i2c进行了详细的了解。然后做了如下知识整理：
+首先是i2c_adpater 和 i2c_client这两个结构体。adapter指mcu里的i2c控制模块，s5pv210里有3个i2c接口分布是i2c0 i2c1 i2c2，所以对应的就会创建出3个adapter。其中i2c0上挂载这gsensor。client则指挂载在i2c接口上的那些设备，比如gsensor。I2设备链表中有I2C_adapter和I2C_Client，I2C_adapter数量取决于I2C控制器的数量，而I2C_Client的数量取决于I2C设备的数量。I2C_adapter指的是某个I2C控制器，包含有I2C通信的方法，即产生标准I2C的时序与I2C设备通信;I2C_Client 指的是某个I2C设备，包含有设备名和器件地址以及所挂接在的哪个I2C控制器中，即I2C_adapter。(我想我已经将i2c_adapter和i2c_client是什么讲得很清楚了)
+struct i2c_adatper//表示i2c适配器/i2c控制器
+{
+	struct i2c_algorithm *algo;            // 通信方法 重要 操作硬件 I2C协议的实现
+	struct device dev;                     // 设备对象
+	int nr;                                // 适配器编号 用来匹配 I2C_Clinet和作为设备号
+	char name[48];                         // 适配器名字
+	...
+};
+struct i2c_client//表示一个i2c设备
+{
+	unsigned short addr;              //设备地址
+	char name[I2C_NAME_SIZE];  	  //设备名字
+	struct device dev;                //设备结构体
+	struct i2c_adapter *adapter;      //所属适配器
+	int irq;                          //此设备对应的中断号
+};
+在dev_i2c0.c中记录了，这里面记录了控制器(i2c0)的硬件资源(如相关寄存器、中断)，并且我也去对比s5pv210的数据手册，硬件资源数据都是对的。如下：
+static struct resource s3c_i2c_resource[] = {
+	[0] = {
+		.start = S3C_PA_IIC,//i2c0寄存器开始
+		.end   = S3C_PA_IIC + SZ_4K - 1,//结束
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start = IRQ_IIC,//VIC1(14) 中断号
+		.end   = IRQ_IIC,
+		.flags = IORESOURCE_IRQ,
+	},
+};
+
+struct platform_device s3c_device_i2c0 = {
+	.name		  = "s3c2410-i2c",	//平台设备名字，是与平台驱动匹配的依据
+	.id		  = 0,
+	.num_resources	  = ARRAY_SIZE(s3c_i2c_resource),
+	.resource	  = s3c_i2c_resource,	//见上面
+};
+
+static struct s3c2410_platform_i2c default_i2c_data0 __initdata = {
+	.flags		= 0,
+	.slave_addr	= 0x10,//卵用
+	.frequency	= 400*1000,
+	.sda_delay	= S3C2410_IICLC_SDA_DELAY15 | S3C2410_IICLC_FILTER_ON,
+};
+
+void __init s3c_i2c0_set_platdata(struct s3c2410_platform_i2c *pd)//在mach-x210.c里以 s3c_i2c0_set_platdata(NULL); 形式被调用
+{
+	struct s3c2410_platform_i2c *npd;
+
+	if (!pd)
+		pd = &default_i2c_data0;//进行了赋值
+
+	////该函数是根据给定的一段地址区间，再分配一个内存空间，将原地址空间的内容拷贝到新分配的内存空间中。
+	npd = kmemdup(pd, sizeof(struct s3c2410_platform_i2c), GFP_KERNEL);
+	if (!npd)
+		printk(KERN_ERR "%s: no memory for platform data\n", __func__);
+	else if (!npd->cfg_gpio)
+		npd->cfg_gpio = s3c_i2c0_cfg_gpio;//里面实现的是设置引脚为SCL0 SDA0模式
+
+	s3c_device_i2c0.dev.platform_data = npd;//将平台设备的私有数据指针指向该空间，完善了平台设备的内容
+}
+________________________________________________________________________________________________________________________________________
+1.、内核会先将所有的I2C设备的板级资源加载到 __i2c_board_list 链表(包含该I2C设备挂载在I2C控制器的编号，我们手动指定的)：
+	在mach-x210.c中i2c_register_board_info(0, i2c_devs0, ARRAY_SIZE(i2c_devs0));//其中i2c_devs是空的，也在mach-x210.c里
+2、然后设置平台私有数据和加载所有I2C控制器的平台设备资源
+	s3c_i2c0_set_platdata(NULL);//mach-x210.c里调用，该函数在上面记录的dev_i2c0.c里
+	//你懂的，在smdkc110_machine_init(void)函数里platform_add_devices(smdkc110_devices, ARRAY_SIZE(smdkc110_devices));注册平台设备
+	static struct platform_device *smdkv210_devices[] __initdata = {
+	...
+		&s3c_device_i2c0,
+	...
+	}
+3、根据平台设备的名字，搜索后，找到该名字出现的地方，进入i2c-s3c2410.c
+	subsys_initcall(i2c_adap_s3c_init);	
+	static int __init i2c_adap_s3c_init(void)
+	{
+		return platform_driver_register(&s3c24xx_i2c_driver);//一进来就执行，注册平台驱动
+	}
+	static struct platform_driver s3c24xx_i2c_driver = {
+	.probe		= s3c24xx_i2c_probe,
+	.remove		= s3c24xx_i2c_remove,
+	.id_table	= s3c24xx_driver_ids,//如下结构体
+	.driver		= {
+		.owner	= THIS_MODULE,
+		.name	= "s3c-i2c",
+		.pm	= S3C24XX_DEV_PM_OPS,
+		},
+	};
+	static struct platform_device_id s3c24xx_driver_ids[] = {
+		{
+			.name		= "s3c2410-i2c",//在这里，平台设备与平台驱动匹配上
+			.driver_data	= TYPE_S3C2410,
+		}, {
+			.name		= "s3c2440-i2c",
+			.driver_data	= TYPE_S3C2440,
+		}, { },
+	};
+	
+	s3c24xx_i2c_probe很长～～！我捡有必要的做记录。这个probe函数作用主要的工作是初始化I2C控制器，构建I2C_adapter和I2C_Client，并将其加入到I2C设备链表。
+	1、pdata = pdev->dev.platform_data;//从平台设备中获取私有数据，在dev-i2c0.c里赋的值，上面有提到，追其根源也就是default_i2c_data0了
+	2、为I2C控制器构建i2c_adapter，设置方法(master_xfex) 即与I2C设备通信的方法(I2C协议通信的实现)
+	strlcpy(i2c->adap.name, "s3c2410-i2c", sizeof(i2c->adap.name));
+	i2c->adap.owner   = THIS_MODULE;
+	i2c->adap.algo    = &s3c24xx_i2c_algorithm;//在这里设置的master_xfer,见下面的结构体
+	i2c->adap.retries = 2;
+	i2c->adap.class   = I2C_CLASS_HWMON | I2C_CLASS_SPD
+		static const struct i2c_algorithm s3c24xx_i2c_algorithm = {
+		.master_xfer		= s3c24xx_i2c_xfer,//这个的调用是s3c24xx_i2c_xfer->s3c24xx_i2c_doxfer->s3c24xx_i2c_message_start
+		.functionality		= s3c24xx_i2c_func,
+		};
+	3、获取I2C时钟，并使能I2C时钟源
+	i2c->clk = clk_get(&pdev->dev, "i2c");
+	clk_enable(i2c->clk);
+	4、获取I2C平台设备资源(该I2C控制器的寄存器)
+	platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	5、先确认资源可用，再将寄存器地址 内存映射出来
+	i2c->ioarea = request_mem_region(res->start, resource_size(res), pdev->name);if(i2c->ioarea == NULL){...}
+	i2c->regs = ioremap(res->start, resource_size(res));if(i2c->regs == NULL){...}
+	6、初始化该I2C控制器，如管脚功能配置、设置时钟、初始化等
+	s3c24xx_i2c_init(i2c);//我进入看过，没啥大不了的。对着数据手册就能看懂
+	7、获取I2C平台设备中断资源并注册中断
+	platform_get_irq(pdev, 0);
+	request_irq(i2c->irq, s3c24xx_i2c_irq, IRQF_DISABLED, dev_name(&pdev->dev), i2c);//中断调用顺序s3c24xx_i2c_irq->i2c_s3c_irq_nextbyte
+	8、将从平台私有数据获取到的 编号 赋值给 adap
+	i2c->adap.nr = pdata->bus_num;
+	虽然在default_i2c_data0里没有对变量bus_num进行设置，但博客上的代码是赋值了的。然而根据第898行的提示，即使没有设置，默认还是从0开始。
+	9、将i2c_adapter 加入到I2C设备链表
+	i2c_add_numbered_adapter(&i2c->adap);//内含如下重要操作,当然这函数，包括下面所有，都在i2c-core.c
+		i2c_register_adapter(adap);
+			dev_set_name(&adap->dev, "i2c-%d", adap->nr);
+			adap->dev.bus = &i2c_bus_type;
+			adap->dev.type = &i2c_adapter_type; 
+			device_register(&adap->dev);//将i2c_adapter 加入设备链表
+			i2c_scan_static_board_info(adap);
+				list_for_each_entry(devinfo, &__i2c_board_list, list) 
+				{
+					if (devinfo->busnum == adapter->nr && !i2c_new_device(adapter,&devinfo->board_info))
+						dev_err(&adapter->dev,"Can't create device at 0x%02x\n",devinfo->board_info.addr);
+				}//这是从__i2c_board_list取出I2C设备所包含的编号与该I2C控制器的编号匹配 (有三个I2C设备就会找到三次)
+                     		 //匹配成功后将该I2C设备构建一个I2C_client，并将板级信息填充进去(设备名和器件地址)并把I2C_adapter记录其中。
+				 //其实没必要去看，有需求的时候去看也不急。下面对i2c_new_device进行记录，还是那句话，只是记录，没必要去看
+					i2c_new_device//作用是实例化一个i2c device并且绑定driver
+					client = kzalloc(sizeof *client, GFP_KERNEL);
+       					client->adapter = adap;// I2C控制器
+       					client->dev.platform_data = info->platform_data;
+       					client->flags = info->flags;
+      					client->addr = info->addr;// 器件地址
+       					client->irq = info->irq;
+					strlcpy(client->name, info->type, sizeof(client->name));// 设备名
+       					client->dev.parent = &client->adapter->dev;
+       					client->dev.bus = &i2c_bus_type;
+       					client->dev.type = &i2c_client_type;
+       					client->dev.of_node = info->of_node;
+					dev_set_name(&client->dev, "%d-%04x", i2c_adapter_id(adap), client->addr);
+					device_register(&client->dev);//将I2C_Client 加入到I2C设备链表
+4、i2c-dev.c的流程
+	1、在i2c_dev_init(void)函数里，注册名为”i2c”的字符设备文件和”i2c-dev”的类，并且绑定fops
+	res = register_chrdev(I2C_MAJOR, "i2c", &i2cdev_fops);//设备号89
+	i2c_dev_class = class_create(THIS_MODULE, "i2c-dev");
+	static const struct file_operations i2cdev_fops = {
+		.owner		= THIS_MODULE,
+		.llseek		= no_llseek,
+		.read		= i2cdev_read,
+		.write		= i2cdev_write,
+		.unlocked_ioctl	= i2cdev_ioctl,
+		.open		= i2cdev_open,
+		.release	= i2cdev_release,
+	};
+	2、遍历所有的I2C_adapter(还是在i2c_dev_init(void)函数里)
+	i2c_add_driver(&i2cdev_driver);//i2cdev_driver下面第7排有记录
+		i2c_register_driver(THIS_MODULE, driver);
+			bus_for_each_dev(&i2c_bus_type, NULL, driver, __process_new_driver);//对每一个存在的i2c_adapter,调用__process_new_driver()函数
+	其中__process_new_driver函数里是
+		i2c_do_add_adapter(data, to_i2c_adapter(dev));//在i2c-core.c中
+			driver->attach_adapter(adap);
+			//这里的真实调用，我根据应用层创建出来的/dev下的设备文件i2c-0 i2c-1 i2c-2 猜测是i2c-dev.c下的i2cdev_attach_adapter
+	static struct i2c_driver i2cdev_driver = {
+		.driver = {
+			.name	= "dev_driver",
+		},
+		.attach_adapter	= i2cdev_attach_adapter,
+		.detach_adapter	= i2cdev_detach_adapter,
+	};
+	3、在i2cdev_attach_adapter函数中创建主设备号相同(89)的3个i2c adapter,即/dev下的i2c-0 i2c-1 i2c-2
+	i2c_dev->dev = device_create(i2c_dev_class, &adap->dev,MKDEV(I2C_MAJOR, adap->nr), NULL,"i2c-%d", adap->nr);
+	所以这三个adapter都具有file_operations i2cdev_fops结构体了的open,read,write,ioctl函数
+	关于其中的ioctl里的I2C_RDWR命令，调用的函数我有彻底的仔细分析(在那几个痛苦的日夜里)，然而还是没分析出最开始使用ioctl函数的应用层c代码为什么接收到的值
+	不对。
+
+来到黎明前最后一个晚上，在有了使用read/write来成功i2c通信的经历，我决定去对比，内核中read/write与ioctl里I2C_RDWR的差异。对比时，我是一边对比应用层的两份c代码，一边对比内核里i2cdev_fops里的read/write和ioctl里的I2C_RDWR。对比着对比着，突然在一瞥之间，发现(黎明来了)，使用ioctl的应用层c代码里，有个地方malloc分配内存时sizeof了一个变量，原本是想分配那个变量对应的结构体大小的内存，结果那个变量偏偏又是个指针变量。这跟头让我摔得，好几个日夜呀......
+现在分析来当时会犯这样的错误：1、最开始写这个代码的时候，自己本来就是个小白，有对未知的害怕 2、时间是接近晚上12点了，有点困，大意了 3、感冒没好..!
+总结：
+	1、我也是傻，干嘛去怀疑别人的驱动代码。^^!
+	2、这时一篇对与i2c驱动工程师的小白成长记，前提是在有嵌入式驱动学习的基础上
+	3、并不是涵盖所有i2c知识点讲解。比如...自己去想吧，不想写了。反正对于做嵌入式开发，添加i2c设备，挂接上并使用，绝对是够了
+	4、最后套用和朱老师分享这一经过时，老师给的总结：最后明白了一个道理，所有的问题都是细节问题，都需要功力和细心来解决
+
+两个.c文件是两种方式去通信i2c设备，即一种用ioctl，一种用read/write
+
